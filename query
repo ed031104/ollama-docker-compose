@@ -1,6 +1,6 @@
 USE [NimacOptiwork]
 GO
-/****** Object:  StoredProcedure [dbo].[sp_ImportarFacturasAS400]    Script Date: 25/8/2026 10:20:12 ******/
+/****** Object:  StoredProcedure [dbo].[sp_ImportarFacturasAS400]    Script Date: 25/08/2026 10:29:45 a. m. ******/
 SET ANSI_NULLS ON
 GO
 SET QUOTED_IDENTIFIER ON
@@ -138,15 +138,25 @@ begin
     )
     OUTPUT inserted.InvoiceID, inserted.RFDCNO INTO @InsertedInvoices
     SELECT 
-    d.SLSTYP, d.RFDCNO, d.CUNM, d.SPVIDS, d.TRXCD, d.DOCSU, d.LNNO, d.BOIMCT, d.BOSFX, d.ENDT8, d.ORQY, d.SOS1, d.SPQTY, d.STNO, d.UNCS, d.UNLS, d.UNSEL, d.WTUM,
-    GETDATE(), 0, 0, 1
-    from #InventarioDocs d
+        d.SLSTYP, d.RFDCNO, d.CUNM, d.SPVIDS, d.TRXCD, d.DOCSU, d.LNNO, d.BOIMCT, d.BOSFX, d.ENDT8, d.ORQY, d.SOS1, d.SPQTY, d.STNO, d.UNCS, d.UNLS, d.UNSEL, d.WTUM,
+        GETDATE(), 0, 0, 1
+    from 
+        #InventarioDocs d
     -- verificar que no estén duplicadas
     WHERE d.RFDCNO NOT IN (SELECT fd.RFDCNO FROM #FacturasDuplicadas fd)
     --verificar que no existan ya en la tabla de WorkshopInvoice
     AND not exists (
         select 1
         from WorkshopInvoice wi
+        where 
+             wi.RFDCNO = d.RFDCNO 
+             AND wi.LNNO = d.LNNO
+             AND WI.CUNM = d.CUNM 
+    )
+    -- validar que no existar en la tabla warehouseInvoice
+    and not exists (
+        select 1
+        from WarehouseInvoice wi
         where 
              wi.RFDCNO = d.RFDCNO 
              AND wi.LNNO = d.LNNO
