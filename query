@@ -1,0 +1,203 @@
+USE [NimacOptiwork]
+GO
+/****** Object:  StoredProcedure [dbo].[sp_ImportarFacturasAS400]    Script Date: 25/8/2026 10:20:12 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+
+ALTER procedure [dbo].[sp_ImportarFacturasAS400]
+@nameLinkedServer nvarchar(60),
+@fecha NVARCHAR(8)
+as
+begin
+    IF OBJECT_ID('tempdb..#InventarioDocs') IS NOT NULL
+        DROP TABLE #InventarioDocs;
+
+     IF OBJECT_ID('tempdb..#InventarioDocsTemp') IS NOT NULL
+        DROP TABLE #InventarioDocsTemp;
+
+
+    declare @InvoiceDuplicate nvarchar(max);
+
+    CREATE TABLE #InventarioDocs (
+        STNO    INT,              -- Número de almacén / sucursal
+        BOSFX   INT,              -- Sufijo o código auxiliar
+        SLSTYP  CHAR(1),          -- Tipo de línea (ej: S=Sale)
+        ENDT8   VARCHAR(10),             -- Fecha (año-mes-día)
+        DOCSU   CHAR(1),          -- Tipo de documento (ej: D=Documento)
+        RFDCNO  VARCHAR(20),      -- Número de referencia / factura
+        LNNO    INT,              -- Número de línea
+        SOS1    INT,              -- Código auxiliar
+        PANO20  VARCHAR(50),      -- Código de producto
+        DS18    VARCHAR(50),      -- Descripción
+        ORQY    INT,    -- Cantidad original
+        BOIMCT  INT,    -- Monto base
+        SPQTY   INT,    -- Cantidad vendida
+        TRXCD   VARCHAR(5),       -- Código de transacción (ej: SS, AJ)
+        UNCS    DECIMAL(12,3),    -- Costo unitario
+        UNLS    DECIMAL(12,3),    -- Precio unitario lista
+        UNSEL   DECIMAL(12,3),    -- Precio unitario neto
+        WTUM    DECIMAL(12,3),    -- Peso / unidad de medida
+        CUNM    VARCHAR(100),     -- Cliente / Razón social
+        SPVIDS  VARCHAR(50)
+    );
+
+        CREATE TABLE #InventarioDocsTemp (
+        STNO    INT,              -- Número de almacén / sucursal
+        BOSFX   INT,              -- Sufijo o código auxiliar
+        SLSTYP  CHAR(1),          -- Tipo de línea (ej: S=Sale)
+        ENDT8   VARCHAR(10),             -- Fecha (año-mes-día)
+        DOCSU   CHAR(1),          -- Tipo de documento (ej: D=Documento)
+        RFDCNO  VARCHAR(20),      -- Número de referencia / factura
+        LNNO    INT,              -- Número de línea
+        SOS1    INT,              -- Código auxiliar
+        PANO20  VARCHAR(50),      -- Código de producto
+        DS18    VARCHAR(50),      -- Descripción
+        ORQY    INT,    -- Cantidad original
+        BOIMCT  INT,    -- Monto base
+        SPQTY   INT,    -- Cantidad vendida
+        TRXCD   VARCHAR(5),       -- Código de transacción (ej: SS, AJ)
+        UNCS    DECIMAL(12,3),    -- Costo unitario
+        UNLS    DECIMAL(12,3),    -- Precio unitario lista
+        UNSEL   DECIMAL(12,3),    -- Precio unitario neto
+        WTUM    DECIMAL(12,3),    -- Peso / unidad de medida
+        CUNM    VARCHAR(100),     -- Cliente / Razón social
+        SPVIDS  VARCHAR(50)
+    );
+
+    -- se obtiene la fecha actual en formato AAAAMMDD y se agrega en la query para consultar de manera dinamica la fecha actual desde el AS/400
+    DECLARE
+        @sql NVARCHAR(MAX);
+
+	if(@fecha is null) 
+		BEGIN
+			set @fecha = CONVERT(char(8), GETDATE(), 112);
+		END
+	ELSE
+		BEGIN
+			set @fecha = @fecha
+		END
+
+    set @sql = N'
+    select
+        *
+    from OPENQUERY("'+@nameLinkedServer+'", ''
+    SELECT
+        PCPCOHD0.STNO, PCPCOHD0.BOSFX, PCPCOHD0.SLSTYP, PCPCOHD0.ENDT8, PCPCOHD0.DOCSU, PCPCOPD0.RFDCNO, PCPCOPD0.LNNO, PCPCOPD0.SOS1, PCPCOPD0.PANO20, PCPCOPD0.DS18,
+        PCPCOPD0.ORQY, PCPCOPD0.BOIMCT, PCPCOPD0.SPQTY, PCPCOHD0.TRXCD, PCPCOPD0.UNCS, PCPCOPD0.UNLS, PCPCOPD0.UNSEL, PCPCOPD0.WTUM, PCPCOHD0.CUNM, PCPCOHD0.SPVIDS
+    FROM
+        S10F6A6C.LIBP37.PCPCOHD0 PCPCOHD0, S10F6A6C.LIBP37.PCPCOPD0 PCPCOPD0
+    WHERE
+        PCPCOHD0.RFDCNO = PCPCOPD0.RFDCNO
+    AND
+        (
+            (PCPCOHD0.STNO In (60,70,84))
+        AND
+            (PCPCOHD0.SLSTYP Not In (''''T'''',''''B''''))
+        AND
+            (PCPCOHD0.DOCSU In (''''D'''',''''F''''))
+        AND
+            (PCPCOHD0.TRXCD In (''''CS'''',''''SS''''))
+        AND
+            (PCPCOPD0.SPQTY>=1)
+        AND
+            (PCPCOHD0.BOSFX=0)
+        AND
+            (PCPCOHD0.ENDT8 >= ''''' + @fecha + ''''' )
+        )
+    '')';
+
+    -- Se inserta toda la data obtenida en la tabla temporal
+    INSERT INTO #InventarioDocs
+    EXEC sp_executesql @sql;
+    
+    DECLARE @InsertedInvoices TABLE (
+        InvoiceId INT,
+        RFDCNO NVARCHAR(50)
+    );
+
+    SELECT RFDCNO
+    INTO #FacturasDuplicadas
+    FROM #InventarioDocs
+    WHERE DOCSU IN ('F', 'D') AND TRXCD = 'CS'
+    GROUP BY RFDCNO
+    HAVING COUNT(DISTINCT DOCSU) = 2;
+
+
+    select @InvoiceDuplicate = (
+        select * from #FacturasDuplicadas for JSON PATH, ROOT('FacturasDuplicadas_RecoleccionDeDocumentos')
+    );
+    declare @dateActual Datetime = GETDATE();
+    execute [insertLogJobEvent] @InvoiceDuplicate, @dateActual, 1;
+    
+    -- Insertar facturas nuevas y guardar sus IDs
+    INSERT INTO WorkshopInvoice (
+        SLSTYP,RFDCNO, CUNM, SPVIDS, TRXCD, DOCSU, LNNO, BOIMCT, BOSFX, ENDT8, ORQY, SOS1, SPQTY, STNO, UNCS, UNLS, UNSEL, WTUM,
+         DateEntry, IsAssigned, IsCompleted, Active 
+    )
+    OUTPUT inserted.InvoiceID, inserted.RFDCNO INTO @InsertedInvoices
+    SELECT 
+    d.SLSTYP, d.RFDCNO, d.CUNM, d.SPVIDS, d.TRXCD, d.DOCSU, d.LNNO, d.BOIMCT, d.BOSFX, d.ENDT8, d.ORQY, d.SOS1, d.SPQTY, d.STNO, d.UNCS, d.UNLS, d.UNSEL, d.WTUM,
+    GETDATE(), 0, 0, 1
+    from #InventarioDocs d
+    -- verificar que no estén duplicadas
+    WHERE d.RFDCNO NOT IN (SELECT fd.RFDCNO FROM #FacturasDuplicadas fd)
+    --verificar que no existan ya en la tabla de WorkshopInvoice
+    AND not exists (
+        select 1
+        from WorkshopInvoice wi
+        where 
+             wi.RFDCNO = d.RFDCNO 
+             AND wi.LNNO = d.LNNO
+             AND WI.CUNM = d.CUNM 
+    );
+
+
+
+    -- Se crean las tareas para las facturas nuevas importadas y se obtienen los ids de las tareas creadas para asignarlas
+    declare @TaskIdTable table (TaskID INT);
+
+    -- no se tiene que repetir el numero de factura(RFDCNO) en la tabla de tareas 
+    insert into Task (Invoice, Description,CreatedDate ,CREATEDBy, Discriminator, IsAssigned, WarehouseComment )
+    output inserted.TaskID into @TaskIdTable
+    select
+        Distinct
+        t.RFDCNO,
+        'Creación de tarea de factura importada desde AS/400',
+        GETDATE(),
+        'system',
+        'Workshop',
+        0,
+        Null
+    from  @InsertedInvoices t
+    -- se tiene que validar que la RFDCNO no exista en la tabla de tareas
+    where not exists (
+        select 1
+        from Task tk
+        where tk.Invoice = t.RFDCNO
+        AND
+            tk.Discriminator = 'Workshop'
+    );
+
+    -- se asignan las tareas creadas con user id null
+    declare @taskAssign table (TaskAssignmentID INT);
+
+    insert into  TaskAssignment(TaskID, AssignedTo, AssignedDate)
+    output inserted.TaskAssignmentID into @taskAssign
+    select
+        tt.TaskID,
+        null,
+        GETDATE()
+    from @TaskIdTable tt
+
+    -- se asigna el estado creado a las tareas creadas
+
+    Insert into TaskStatusHistory(TaskStateID, ChangedDate, ChangedBy, TaskAssignmentId)
+    select
+        5, --El estado 5 es "Creado"
+        GETDATE(),
+        'system',
+        ta.TaskAssignmentID
+    from @taskAssign ta
+end
